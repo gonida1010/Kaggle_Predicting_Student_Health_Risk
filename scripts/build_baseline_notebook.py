@@ -39,6 +39,8 @@ This notebook creates the validation foundation before model tuning.
 - Matching OOF and test probabilities
 - CatBoost, LightGBM, and XGBoost
 - Fold scores, class recall, confusion matrices, and training curves
+- EDA-derived ordinal, zero-exercise, low-calorie, and interaction features
+- OOF subset diagnostics for stress, sleep, activity, missingness, and class boundaries
 - Equal-probability ensemble as a diagnostic baseline
 
 Start with smoke mode. Change only `RUN_MODE` to `full` after the smoke artifacts have
@@ -90,6 +92,7 @@ summary"""
 4. The selected iteration follows validation balanced accuracy.
 5. The submission IDs match `sample_submission.csv`.
 6. Training curves show both balanced accuracy and logloss.
+7. `subset_metrics.csv` identifies weak stress, sleep, activity, and boundary groups.
 
 Do not tune stacking weights from public leaderboard feedback. The next stage will use
 these OOF sources for repeated-CV model comparison, feature ablation, source diversity,

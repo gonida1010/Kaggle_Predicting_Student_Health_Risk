@@ -40,6 +40,17 @@ CATEGORICAL_COLUMNS = [
     "gender",
 ]
 
+ORDINAL_MAPPINGS = {
+    "stress_level": {"low": 0.0, "medium": 1.0, "high": 2.0},
+    "sleep_quality": {"poor": 0.0, "average": 1.0, "good": 2.0},
+    "physical_activity_level": {
+        "sedentary": 0.0,
+        "moderate": 1.0,
+        "active": 2.0,
+    },
+    "smoking_alcohol": {"no": 0.0, "occasional": 1.0, "yes": 2.0},
+}
+
 
 @dataclass
 class CVConfig:
@@ -183,6 +194,31 @@ def add_features(frame: pd.DataFrame) -> pd.DataFrame:
     result["sleep_activity_interaction"] = (
         frame["sleep_duration"] * np.log1p(frame["step_count"].clip(lower=0))
     )
+
+    ordinal_views: dict[str, pd.Series] = {}
+    for column, mapping in ORDINAL_MAPPINGS.items():
+        ordinal = frame[column].map(mapping).astype(np.float32)
+        result[f"{column}__ordinal"] = ordinal
+        ordinal_views[column] = ordinal
+
+    result["exercise_is_zero"] = frame["exercise_duration"].eq(0).astype(np.int8)
+    result["calorie_low_mode"] = frame["calorie_expenditure"].lt(1950).astype(np.int8)
+    result["ordinal_risk_sum"] = (
+        ordinal_views["stress_level"]
+        + (2.0 - ordinal_views["sleep_quality"])
+        + (2.0 - ordinal_views["physical_activity_level"])
+        + ordinal_views["smoking_alcohol"]
+    )
+    result["stress_sleep_deviation"] = (
+        ordinal_views["stress_level"] - ordinal_views["sleep_quality"]
+    )
+    result["stress_activity_gap"] = (
+        ordinal_views["stress_level"] - ordinal_views["physical_activity_level"]
+    )
+    result["sleep_activity_ordinal"] = (
+        ordinal_views["sleep_quality"]
+        * ordinal_views["physical_activity_level"]
+    )
     return result
 
 
@@ -210,6 +246,117 @@ def prepare_feature_views(
         test_encoded[column] = test_values.map(mapping).fillna(-1).astype(np.int16)
 
     return train_cat, test_cat, train_encoded, test_encoded, categorical_columns
+
+
+def make_subset_masks(frame: pd.DataFrame, y_true: np.ndarray) -> dict[str, np.ndarray]:
+    missing_count = frame[NUMERIC_COLUMNS + CATEGORICAL_COLUMNS].isna().sum(axis=1)
+    masks: dict[str, np.ndarray] = {
+        "all": np.ones(len(frame), dtype=bool),
+        "stress_low": frame["stress_level"].eq("low").to_numpy(),
+        "stress_medium": frame["stress_level"].eq("medium").to_numpy(),
+        "stress_high": frame["stress_level"].eq("high").to_numpy(),
+        "stress_missing": frame["stress_level"].isna().to_numpy(),
+        "sleep_lt_6h": frame["sleep_duration"].lt(6).to_numpy(),
+        "sleep_6_to_8h": frame["sleep_duration"].between(6, 8).to_numpy(),
+        "sleep_gt_8h": frame["sleep_duration"].gt(8).to_numpy(),
+        "sleep_missing": frame["sleep_duration"].isna().to_numpy(),
+        "activity_sedentary": frame["physical_activity_level"]
+        .eq("sedentary")
+        .to_numpy(),
+        "activity_moderate": frame["physical_activity_level"]
+        .eq("moderate")
+        .to_numpy(),
+        "activity_active": frame["physical_activity_level"].eq("active").to_numpy(),
+        "activity_missing": frame["physical_activity_level"].isna().to_numpy(),
+        "exercise_zero": frame["exercise_duration"].eq(0).to_numpy(),
+        "calorie_lt_1950": frame["calorie_expenditure"].lt(1950).to_numpy(),
+        "bmi_missing": frame["bmi"].isna().to_numpy(),
+        "missing_count_ge_3": missing_count.ge(3).to_numpy(),
+        "true_at_risk_or_unhealthy": np.isin(
+            y_true, [TARGET_MAP["at-risk"], TARGET_MAP["unhealthy"]]
+        ),
+        "true_fit_or_at_risk": np.isin(
+            y_true, [TARGET_MAP["fit"], TARGET_MAP["at-risk"]]
+        ),
+    }
+    return masks
+
+
+def build_subset_report(
+    frame: pd.DataFrame, y_true: np.ndarray, y_pred: np.ndarray
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for subset, mask in make_subset_masks(frame, y_true).items():
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        subset_true = y_true[mask]
+        subset_pred = y_pred[mask]
+        row: dict[str, Any] = {
+            "subset": subset,
+            "rows": count,
+            "share": float(count / len(frame)),
+            "accuracy": float((subset_true == subset_pred).mean()),
+            "balanced_accuracy_present_classes": float(
+                balanced_accuracy_score(subset_true, subset_pred)
+            ),
+        }
+        for class_index, label in enumerate(CLASSES):
+            class_mask = subset_true == class_index
+            support = int(class_mask.sum())
+            row[f"support_{label}"] = support
+            row[f"recall_{label}"] = (
+                float((subset_pred[class_mask] == class_index).mean())
+                if support
+                else np.nan
+            )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def save_subset_graph(
+    report: pd.DataFrame, output_dir: Path, model_name: str
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
+
+    graph_frame = report.loc[report["subset"].ne("all")].copy()
+    graph_frame = graph_frame.sort_values(
+        "balanced_accuracy_present_classes", ascending=True
+    )
+    height = max(7.0, 0.42 * len(graph_frame))
+    fig, axis = plt.subplots(figsize=(12, height), dpi=180)
+    bars = axis.barh(
+        graph_frame["subset"],
+        graph_frame["balanced_accuracy_present_classes"],
+        color="#2563eb",
+    )
+    axis.set_xlim(
+        max(0.0, graph_frame["balanced_accuracy_present_classes"].min() - 0.04),
+        min(1.0, graph_frame["balanced_accuracy_present_classes"].max() + 0.04),
+    )
+    axis.set_xlabel("OOF balanced accuracy among classes present in subset")
+    axis.set_title(f"{model_name}: OOF performance by diagnostic subset")
+    axis.xaxis.set_major_formatter(FormatStrFormatter("%.3f"))
+    axis.grid(axis="x", alpha=0.25)
+    axis.bar_label(
+        bars,
+        labels=[
+            f"{score:.4f}  n={rows:,}"
+            for score, rows in zip(
+                graph_frame["balanced_accuracy_present_classes"],
+                graph_frame["rows"],
+            )
+        ],
+        padding=4,
+        fontsize=8,
+    )
+    fig.tight_layout()
+    fig.savefig(output_dir / f"{model_name}_subset_balanced_accuracy.png")
+    plt.close(fig)
 
 
 def make_fold_assignments(y: np.ndarray, n_splits: int, seed: int) -> np.ndarray:
@@ -674,6 +821,7 @@ def save_diagnostic_graphs(
 
 def run_model_cv(
     model_name: str,
+    train_raw: pd.DataFrame,
     train_cat: pd.DataFrame,
     test_cat: pd.DataFrame,
     train_encoded: pd.DataFrame,
@@ -757,11 +905,13 @@ def run_model_cv(
     oof_score = float(balanced_accuracy_score(y, oof_prediction))
     fold_scores = pd.DataFrame(fold_reports)
     history = pd.concat(history_frames, ignore_index=True)
+    subset_report = build_subset_report(train_raw, y, oof_prediction)
 
     np.save(model_dir / "oof_proba.npy", oof_probability)
     np.save(model_dir / "test_proba.npy", test_probability)
     fold_scores.to_csv(model_dir / "fold_scores.csv", index=False)
     history.to_csv(model_dir / "training_history.csv", index=False)
+    subset_report.to_csv(model_dir / "subset_metrics.csv", index=False)
 
     submission = sample.copy()
     submission[TARGET_COLUMN] = np.asarray(CLASSES)[test_probability.argmax(axis=1)]
@@ -786,6 +936,7 @@ def run_model_cv(
         model_dir,
         model_name,
     )
+    save_subset_graph(subset_report, model_dir, model_name)
     progress(f"{model_name} full OOF balanced_accuracy={oof_score:.6f}")
     return {
         "model": model_name,
@@ -841,6 +992,15 @@ def run_baseline(root: Path, config: CVConfig) -> pd.DataFrame:
         "catboost_columns": train_cat.columns.tolist(),
         "encoded_columns": train_encoded.columns.tolist(),
         "categorical_columns": categorical_columns,
+        "ordinal_mappings": ORDINAL_MAPPINGS,
+        "eda_features": [
+            "exercise_is_zero",
+            "calorie_low_mode",
+            "ordinal_risk_sum",
+            "stress_sleep_deviation",
+            "stress_activity_gap",
+            "sleep_activity_ordinal",
+        ],
     }
     (output_root / "feature_manifest.json").write_text(
         json.dumps(feature_manifest, indent=2), encoding="utf-8"
@@ -851,6 +1011,7 @@ def run_baseline(root: Path, config: CVConfig) -> pd.DataFrame:
         results.append(
             run_model_cv(
                 model_name,
+                train_work,
                 train_cat,
                 test_cat,
                 train_encoded,
@@ -889,8 +1050,17 @@ def run_baseline(root: Path, config: CVConfig) -> pd.DataFrame:
         ensemble_score = float(balanced_accuracy_score(y, ensemble_prediction))
         ensemble_dir = output_root / "equal_ensemble"
         ensemble_dir.mkdir(exist_ok=True)
+        ensemble_subset_report = build_subset_report(
+            train_work, y, ensemble_prediction
+        )
         np.save(ensemble_dir / "oof_proba.npy", ensemble_oof)
         np.save(ensemble_dir / "test_proba.npy", ensemble_test)
+        ensemble_subset_report.to_csv(
+            ensemble_dir / "subset_metrics.csv", index=False
+        )
+        save_subset_graph(
+            ensemble_subset_report, ensemble_dir, "equal_ensemble"
+        )
         submission = sample.copy()
         submission[TARGET_COLUMN] = np.asarray(CLASSES)[ensemble_test.argmax(axis=1)]
         submission.to_csv(ensemble_dir / "submission.csv", index=False)
