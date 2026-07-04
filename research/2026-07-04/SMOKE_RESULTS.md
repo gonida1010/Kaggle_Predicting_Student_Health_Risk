@@ -108,8 +108,51 @@ equal_ensemble/
 
 ## 다음 실행
 
-1. 수정된 LightGBM iteration 선택을 짧게 재검증합니다.
-2. notebook 기본 smoke mode 60,000행을 실행합니다.
-3. 그래프와 fold 편차를 확인합니다.
-4. 문제가 없으면 `RUN_MODE = "full"`로 변경해 5-fold를 실행합니다.
-5. full OOF 결과를 첫 일반화 baseline으로 고정합니다.
+notebook 기본 smoke mode 60,000행 실행까지 완료했습니다.
+
+## 60,000행 smoke 결과
+
+```text
+XGBoost         0.944928
+Equal ensemble  0.944460
+LightGBM        0.943124
+CatBoost        0.942708
+```
+
+XGBoost class recall:
+
+```text
+fit        0.938746
+at-risk    0.937481
+unhealthy  0.958557
+```
+
+XGBoost fold 점수는 `0.944505`, `0.945351`이며 표준편차는 `0.000423`이었다.
+최적 반복은 fold별 105, 47이었다. 검증 balanced accuracy는 초반에 상승한 뒤
+평탄해졌고, 학습 점수만 계속 상승해 조기 종료 방향이 정상임을 확인했다.
+
+모델 간 예측 불일치율:
+
+```text
+CatBoost vs LightGBM  1.2217%
+CatBoost vs XGBoost   1.2500%
+LightGBM vs XGBoost   0.6950%
+```
+
+동일 가중치 평균은 XGBoost 단독보다 낮았다. smoke OOF의 단순 가중치 탐색에서는
+XGBoost 비중 0.7~0.9 구간이 유리했으나, 이 결과는 소표본에서 선택한 값이므로
+최종 가중치로 고정하지 않는다.
+
+혼동행렬에서 가장 큰 오류는 at-risk를 unhealthy로 예측한 2,040행과
+at-risk를 fit으로 예측한 1,181행이었다. 전체 클래스 재현율은 균형을 유지했으며
+다수 클래스 단일 예측 붕괴는 없었다.
+
+부분집합 경고는 실제 존재하는 클래스의 재현율만 평균하는 전용 함수로 수정했고,
+기존 OOF로 `subset_metrics.csv`와 그래프를 다시 생성했다.
+
+## 다음 실행
+
+1. `RUN_MODE = "full"`로 변경해 공통 5-fold를 실행합니다.
+2. full OOF에서 단일 모델 순위와 모델 다양성을 다시 측정합니다.
+3. XGBoost 중심 가중치 혼합은 repeated meta-fold 또는 nested validation으로 검증합니다.
+4. full OOF 결과를 첫 일반화 baseline으로 고정합니다.

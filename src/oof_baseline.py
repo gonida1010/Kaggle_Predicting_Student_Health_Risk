@@ -282,6 +282,16 @@ def make_subset_masks(frame: pd.DataFrame, y_true: np.ndarray) -> dict[str, np.n
     return masks
 
 
+def balanced_accuracy_for_present_classes(
+    y_true: np.ndarray, y_pred: np.ndarray
+) -> float:
+    recalls = []
+    for class_index in np.unique(y_true):
+        class_mask = y_true == class_index
+        recalls.append(float((y_pred[class_mask] == class_index).mean()))
+    return float(np.mean(recalls))
+
+
 def build_subset_report(
     frame: pd.DataFrame, y_true: np.ndarray, y_pred: np.ndarray
 ) -> pd.DataFrame:
@@ -298,7 +308,7 @@ def build_subset_report(
             "share": float(count / len(frame)),
             "accuracy": float((subset_true == subset_pred).mean()),
             "balanced_accuracy_present_classes": float(
-                balanced_accuracy_score(subset_true, subset_pred)
+                balanced_accuracy_for_present_classes(subset_true, subset_pred)
             ),
         }
         for class_index, label in enumerate(CLASSES):
