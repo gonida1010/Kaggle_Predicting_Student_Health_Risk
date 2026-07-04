@@ -1,0 +1,8 @@
+.venv/
+data/
+artifacts/
+outputs/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
