@@ -428,7 +428,9 @@ def train_lightgbm_fold(
         ],
     )
 
-    best_iteration = int(model.best_iteration_)
+    best_iteration = (
+        int(np.argmax(evaluation_result["valid"]["balanced_accuracy"])) + 1
+    )
     valid_probability = normalize_probabilities(
         model.predict_proba(train_features.iloc[valid_index], num_iteration=best_iteration)
     )
@@ -451,6 +453,7 @@ def train_lightgbm_fold(
         "fold": fold,
         "balanced_accuracy": float(score),
         "best_iteration": best_iteration,
+        "library_best_iteration": int(model.best_iteration_),
         **{f"recall_{key}": value for key, value in class_recalls(
             y[valid_index], valid_probability.argmax(axis=1)
         ).items()},
